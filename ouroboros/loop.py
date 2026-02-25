@@ -27,7 +27,14 @@ from ouroboros.models import estimate_cost, emit_llm_usage_event
 log = logging.getLogger(__name__)
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
-# Pricing moved to models.py per Minimalism P5
+READ_ONLY_PARALLEL_TOOLS = frozenset({
+    "repo_read", "repo_list",
+    "data_read", "data_list",
+    "web_search", "codebase_digest", "chat_history",
+})
+
+# Stateful browser tools require thread-affinity (Playwright sync uses greenlet)
+STATEFUL_BROWSER_TOOLS = frozenset({"browse_page", "browser_action"})
 
 
 def _truncate_tool_result(result: Any) -> str:
@@ -693,6 +700,111 @@ def run_llm_loop(
                 cleanup_task_mailbox(drive_root, task_id)
             except Exception:
                 log.debug("Failed to cleanup task mailbox", exc_info=True)
+
+
+def _call_llm_with_retry(
+    llm: LLMClient,
+    messages: List[Dict[str, Any]],
+    model: str,
+    tools: Optional[List[Dict[str, Any]]],
+    effort: str,
+    max_retries: int,
+    drive_logs: pathlib.Path,
+    task_id: str,
+    round_idx: int,
+    event_queue: Optional[queue.Queue],
+    accumulated_usage: Dict[str, Any],
+    task_type: str = "",
+    use_local: bool = False,
+) -> Tuple[Optional[Dict[str, Any]], float]:
+    """
+    Call LLM with retry logic, usage tracking, and event emission.
+
+    Returns:
+        (response_message, cost) on success
+        (None, 0.0) on failure after max_retries
+    """
+    msg = None
+    last_error: Optional[Exception] = None
+
+    for attempt in range(max_retries):
+        try:
+            kwargs = {"messages": messages, "model": model, "reasoning_effort": effort,
+                      "use_local": use_local}
+            if tools:
+                kwargs["tools"] = tools
+            resp_msg, usage = llm.chat(**kwargs)
+            msg = resp_msg
+            add_usage(accumulated_usage, usage)
+
+            # Calculate cost and emit event for EVERY attempt (including retries)
+            cost = float(usage.get("cost") or 0)
+            if not cost:
+                cost = estimate_cost(
+                    model,
+                    int(usage.get("prompt_tokens") or 0),
+                    int(usage.get("completion_tokens") or 0),
+                    int(usage.get("cached_tokens") or 0),
+                    int(usage.get("cache_write_tokens") or 0),
+                )
+
+            # Emit real-time usage event with category based on task_type
+            category = task_type if task_type in ("evolution", "consciousness", "review", "summarize") else "task"
+            emit_llm_usage_event(event_queue, task_id, model, usage, cost, category)
+
+            # Empty response = retry-worthy (model sometimes returns empty content with no tool_calls)
+            tool_calls = msg.get("tool_calls") or []
+            content = msg.get("content")
+            if not tool_calls and (not content or not content.strip()):
+                log.warning("LLM returned empty response (no content, no tool_calls), attempt %d/%d", attempt + 1, max_retries)
+
+                # Log raw empty response for debugging
+                append_jsonl(drive_logs / "events.jsonl", {
+                    "ts": utc_now_iso(), "type": "llm_empty_response",
+                    "task_id": task_id,
+                    "round": round_idx, "attempt": attempt + 1,
+                    "model": model,
+                    "raw_content": repr(content)[:500] if content else None,
+                    "raw_tool_calls": repr(tool_calls)[:500] if tool_calls else None,
+                    "finish_reason": msg.get("finish_reason") or msg.get("stop_reason"),
+                })
+
+                if attempt < max_retries - 1:
+                    time.sleep(2 ** attempt)
+                    continue
+                # Last attempt — return None to trigger "could not get response"
+                return None, cost
+
+            # Count only successful rounds
+            accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1
+
+            # Log per-round metrics
+            _round_event = {
+                "ts": utc_now_iso(), "type": "llm_round",
+                "task_id": task_id,
+                "round": round_idx, "model": model,
+                "reasoning_effort": effort,
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "cached_tokens": int(usage.get("cached_tokens") or 0),
+                "cache_write_tokens": int(usage.get("cache_write_tokens") or 0),
+                "cost_usd": cost,
+            }
+            append_jsonl(drive_logs / "events.jsonl", _round_event)
+            return msg, cost
+
+        except Exception as e:
+            last_error = e
+            append_jsonl(drive_logs / "events.jsonl", {
+                "ts": utc_now_iso(), "type": "llm_api_error",
+                "task_id": task_id,
+                "round": round_idx, "attempt": attempt + 1,
+                "model": model, "error": repr(e),
+            })
+            if attempt < max_retries - 1:
+                time.sleep(min(2 ** attempt * 2, 30))
+
+    return None, 0.0
 
 
 def _process_tool_results(
