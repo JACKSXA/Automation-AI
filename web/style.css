@@ -27,7 +27,7 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+    font-family: -apple-system, BlinkMacSystemFont, 'Hiragino Sans GB', 'Microsoft YaHei', '微软雅黑', 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
     background: var(--bg-primary);
     color: var(--text-primary);
     height: 100vh;
@@ -262,7 +262,7 @@ body {
 
 .chat-bubble .message {
     font-size: 14px;
-    line-height: 1.5;
+    line-height: 1.7;
     color: var(--text-primary);
     white-space: pre-wrap;
 }
@@ -276,7 +276,7 @@ body {
     margin: 6px 0;
     overflow-x: auto;
     font-size: 12px;
-    line-height: 1.5;
+    line-height: 1.7;
 }
 .chat-bubble .message code {
     font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
