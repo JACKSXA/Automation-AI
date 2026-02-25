@@ -21,30 +21,13 @@ import logging
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import compact_tool_history, compact_tool_history_llm
-from ouroboros.utils import utc_now_iso, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
+from ouroboros.utils import utc_now_iso
+from ouroboros.models import MODEL_PRICING_STATIC, append_jsonl, truncate_for_log, sanitize_tool_args_for_log, sanitize_tool_result_for_log, estimate_tokens
 
 log = logging.getLogger(__name__)
 
 # Pricing from OpenRouter API (2026-02-17). Update periodically via /api/v1/models.
-_MODEL_PRICING_STATIC = {
-    "anthropic/claude-opus-4.6": (5.0, 0.5, 25.0),
-    "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
-    "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),
-    "anthropic/claude-sonnet-4.5": (3.0, 0.30, 15.0),
-    "openai/o3": (2.0, 0.50, 8.0),
-    "openai/o3-pro": (20.0, 1.0, 80.0),
-    "openai/o4-mini": (1.10, 0.275, 4.40),
-    "openai/gpt-4.1": (2.0, 0.50, 8.0),
-    "openai/gpt-5.2": (1.75, 0.175, 14.0),
-    "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
-    "google/gemini-2.5-pro-preview": (1.25, 0.125, 10.0),
-    "google/gemini-3.1-pro-preview": (2.0, 0.20, 12.0),
-    "google/gemini-3-pro-preview": (2.0, 0.20, 12.0),
-    "google/gemini-3-flash-preview": (0.15, 0.015, 0.60),
-    "x-ai/grok-3-mini": (0.30, 0.03, 0.50),
-    "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
-}
+# Pricing moved to models.py per Minimalism P5
 
 _pricing_fetched = False
 _cached_pricing = None
@@ -61,7 +44,7 @@ def _get_pricing() -> Dict[str, Tuple[float, float, float]]:
     # Single locked path: avoids races between flag/cache updates.
     with _pricing_lock:
         if _cached_pricing is None:
-            _cached_pricing = dict(_MODEL_PRICING_STATIC)
+            _cached_pricing = dict(MODEL_PRICING_STATIC)
         if _pricing_fetched:
             return _cached_pricing
 
