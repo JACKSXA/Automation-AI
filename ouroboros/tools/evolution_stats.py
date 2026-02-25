@@ -139,6 +139,27 @@ def _collect_data() -> list[dict[str, Any]]:
     return points
 
 
+def _get_repo_slug() -> str:
+    """Derive GitHub repo slug (user/repo) from environment variables.
+
+    Handles two cases:
+    - GITHUB_REPO already contains full slug "user/repo"
+    - GITHUB_REPO contains only repo name and GITHUB_USER contains the owner
+    """
+    repo_env = os.environ.get("GITHUB_REPO", "").strip()
+    user_env = os.environ.get("GITHUB_USER", "").strip()
+
+    # If GITHUB_REPO already looks like a full slug (contains "/"), use it directly
+    if "/" in repo_env:
+        return repo_env
+
+    # Otherwise combine user + repo
+    if user_env and repo_env:
+        return f"{user_env}/{repo_env}"
+
+    return repo_env  # best effort
+
+
 def _push_to_github(data: dict[str, Any]) -> str:
     """Push evolution.json to the repo's docs/ folder via GitHub API."""
     import base64
@@ -148,9 +169,10 @@ def _push_to_github(data: dict[str, Any]) -> str:
     if not token:
         return "error: GITHUB_TOKEN not found"
 
-    user = os.environ.get("GITHUB_USER", "")
-    repo = os.environ.get("GITHUB_REPO", "")
-    repo_slug = f"{user}/{repo}"
+    repo_slug = _get_repo_slug()
+    if not repo_slug or "/" not in repo_slug:
+        return f"error: cannot determine repo slug (GITHUB_REPO={os.environ.get('GITHUB_REPO', '')!r})"
+
     file_path = "docs/evolution.json"
     branch = os.environ.get("GITHUB_BRANCH", "ouroboros")
 
@@ -161,7 +183,7 @@ def _push_to_github(data: dict[str, Any]) -> str:
     }
 
     sha = None
-    r = requests.get(url, headers=headers, timeout=15)
+    r = requests.get(url, headers=headers, params={"ref": branch}, timeout=15)
     if r.status_code == 200:
         sha = r.json().get("sha")
 
@@ -179,7 +201,7 @@ def _push_to_github(data: dict[str, Any]) -> str:
     put_r = requests.put(url, headers=headers, json=payload, timeout=15)
     if put_r.status_code in [200, 201]:
         return f"pushed {len(data.get('points', []))} points to {file_path}"
-    return f"error: {put_r.status_code} — {put_r.text[:200]}"
+    return f"error: {put_r.status_code} — {put_r.text[:300]}"
 
 
 def generate_evolution_stats() -> str:
