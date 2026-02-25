@@ -234,6 +234,8 @@ def _run_supervisor(settings: dict) -> None:
             safe_restart=safe_restart, kill_workers=kill_workers, spawn_workers=spawn_workers,
             sort_pending=sort_pending, consciousness=_consciousness,
             request_restart=_request_restart_exit,
+            soft_timeout=soft_timeout, hard_timeout=hard_timeout,
+            execute_panic=lambda: _execute_panic_stop(_consciousness, kill_workers),
         )
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"
@@ -286,76 +288,8 @@ def _run_supervisor(settings: dict) -> None:
                     st["owner_id"] = user_id
                     st["owner_chat_id"] = chat_id
 
-                from supervisor.message_bus import log_chat
-                log_chat("in", chat_id, user_id, text)
-                st["last_owner_message_at"] = now_iso
-                save_state(st)
-
-                if not text:
-                    continue
-
-                lowered = text.strip().lower()
-                if lowered.startswith("/panic"):
-                    send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
-                    _execute_panic_stop(_consciousness, kill_workers)
-                elif lowered.startswith("/restart"):
-                    send_with_budget(chat_id, "♻️ Restarting (soft).")
-                    ok, restart_msg = safe_restart(reason="owner_restart", unsynced_policy="rescue_and_reset")
-                    if not ok:
-                        send_with_budget(chat_id, f"⚠️ Restart cancelled: {restart_msg}")
-                        continue
-                    kill_workers()
-                    _request_restart_exit()
-                elif lowered.startswith("/review"):
-                    queue_review_task(reason="owner:/review", force=True)
-                elif lowered.startswith("/evolve"):
-                    parts = lowered.split()
-                    action = parts[1] if len(parts) > 1 else "on"
-                    turn_on = action not in ("off", "stop", "0")
-                    st2 = load_state()
-                    st2["evolution_mode_enabled"] = bool(turn_on)
-                    if turn_on:
-                        st2["evolution_consecutive_failures"] = 0
-                    save_state(st2)
-                    if not turn_on:
-                        PENDING[:] = [t for t in PENDING if str(t.get("type")) != "evolution"]
-                        sort_pending()
-                        persist_queue_snapshot(reason="evolve_off")
-                    state_str = "ON" if turn_on else "OFF"
-                    send_with_budget(chat_id, f"🧬 Evolution: {state_str}")
-                elif lowered.startswith("/bg"):
-                    parts = lowered.split()
-                    action = parts[1] if len(parts) > 1 else "status"
-                    if action in ("start", "on", "1"):
-                        result = _consciousness.start()
-                        _bg_s = load_state(); _bg_s["bg_consciousness_enabled"] = True; save_state(_bg_s)
-                        send_with_budget(chat_id, f"🧠 {result}")
-                    elif action in ("stop", "off", "0"):
-                        result = _consciousness.stop()
-                        _bg_s = load_state(); _bg_s["bg_consciousness_enabled"] = False; save_state(_bg_s)
-                        send_with_budget(chat_id, f"🧠 {result}")
-                    else:
-                        bg_status = "running" if _consciousness.is_running else "stopped"
-                        send_with_budget(chat_id, f"🧠 Background consciousness: {bg_status}")
-                elif lowered.startswith("/status"):
-                    from supervisor.state import status_text
-                    status = status_text(WORKERS, PENDING, RUNNING, soft_timeout, hard_timeout)
-                    send_with_budget(chat_id, status, force_budget=True)
-                else:
-                    _consciousness.inject_observation(f"Owner message: {text[:100]}")
-                    agent = _get_chat_agent()
-                    if agent._busy:
-                        agent.inject_message(text)
-                    else:
-                        _consciousness.pause()
-                        def _run_and_resume(cid, txt):
-                            try:
-                                handle_chat_direct(cid, txt, None)
-                            finally:
-                                _consciousness.resume()
-                        threading.Thread(
-                            target=_run_and_resume, args=(chat_id, text), daemon=True,
-                        ).start()
+                from supervisor.command_handler import handle_message
+                handle_message(text, chat_id, user_id, _event_ctx)
 
             crash_count = 0
             time.sleep(0.5)
@@ -663,71 +597,9 @@ from ouroboros.config import read_version as _read_version
 
 
 async def api_cost_breakdown(request: Request) -> JSONResponse:
-    """Aggregate llm_usage events from events.jsonl into cost breakdowns."""
-    events_path = DATA_DIR / "logs" / "events.jsonl"
-    by_model: Dict[str, Dict[str, Any]] = {}
-    by_api_key: Dict[str, Dict[str, Any]] = {}
-    by_model_category: Dict[str, Dict[str, Any]] = {}
-    by_task_category: Dict[str, Dict[str, Any]] = {}
-    total_cost = 0.0
-    total_calls = 0
-
-    def _acc(d, key):
-        if key not in d:
-            d[key] = {"cost": 0.0, "calls": 0}
-        return d[key]
-
-    try:
-        if events_path.exists():
-            with events_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        evt = json.loads(line)
-                    except Exception:
-                        continue
-                    if evt.get("type") != "llm_usage":
-                        continue
-                    cost = float(evt.get("cost") or 0)
-                    model = str(evt.get("model") or "unknown")
-                    api_key_type = str(evt.get("api_key_type") or evt.get("provider") or "openrouter")
-                    model_cat = str(evt.get("model_category") or "other")
-                    task_cat = str(evt.get("category") or "task")
-
-                    total_cost += cost
-                    total_calls += 1
-
-                    e = _acc(by_model, model)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_api_key, api_key_type)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_model_category, model_cat)
-                    e["cost"] += cost
-                    e["calls"] += 1
-
-                    e = _acc(by_task_category, task_cat)
-                    e["cost"] += cost
-                    e["calls"] += 1
-    except Exception:
-        pass
-
-    def _sorted(d):
-        return dict(sorted(d.items(), key=lambda x: x[1]["cost"], reverse=True))
-
-    return JSONResponse({
-        "total_cost": round(total_cost, 4),
-        "total_calls": total_calls,
-        "by_model": _sorted(by_model),
-        "by_api_key": _sorted(by_api_key),
-        "by_model_category": _sorted(by_model_category),
-        "by_task_category": _sorted(by_task_category),
-    })
+    """Aggregate llm_usage events — delegates to supervisor.analytics."""
+    from supervisor.analytics import cost_breakdown
+    return JSONResponse(cost_breakdown(DATA_DIR / "logs" / "events.jsonl"))
 
 
 # ---------------------------------------------------------------------------

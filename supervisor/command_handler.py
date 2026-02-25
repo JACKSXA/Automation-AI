@@ -39,9 +39,8 @@ def handle_message(text: str, chat_id: int, user_id: int, ctx: Any) -> None:
     lowered = text.strip().lower()
 
     if lowered.startswith("/panic"):
-        from server import _execute_panic_stop
         ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
-        _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
+        ctx.execute_panic()
 
     elif lowered.startswith("/restart"):
         ctx.send_with_budget(chat_id, "♻️ Restarting (soft).")
